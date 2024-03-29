@@ -1,0 +1,16 @@
+[package]
+name = "car"
+version = "0.1.0"
+authors = ["bend-n <bend.n@outlook.com>"]
+description = "std::array::{map, from_fn} in const"
+edition = "2021"
+repository = "https://github.com/bend-n/car"
+license = "MIT"
+
+[dependencies]
+proc-macro2 = "1.0.79"
+quote = "1.0.35"
+syn = { version = "2.0.55", features = ["full"] }
+
+[lib]
+proc_macro = true
