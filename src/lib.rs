@@ -6,12 +6,21 @@
 use quote::quote;
 use syn::{parse::Parse, punctuated::Punctuated, spanned::Spanned, *};
 
+fn lib() -> proc_macro2::TokenStream {
+    quote! {
+        // dont worry about this whole area
+        const fn uninit_array<T, const N: usize>() -> [::core::mem::MaybeUninit<T>; N] { unsafe { ::core::mem::MaybeUninit::<[::core::mem::MaybeUninit<T>; N]>::uninit().assume_init() } }
+        const fn uninit_array_copied<T, U, const N: usize>(/* steal the length */ _len: &[U; N]) -> [::core::mem::MaybeUninit<T>; N] { uninit_array() }
+        const unsafe fn aai<T, const N: usize>(array: [::core::mem::MaybeUninit<T>; N]) -> [T; N] { transmute_unchecked(array) }
+        const unsafe fn transmute_unchecked<T, U>(value: T) -> U { unsafe { #[repr(C)] union Transmute<T, U> { t: ::core::mem::ManuallyDrop<T>, u: ::core::mem::ManuallyDrop<U> } ::core::mem::ManuallyDrop::into_inner(Transmute { t: ::core::mem::ManuallyDrop::new(value) }.u) } }
+    }
+}
+
 /// [From fn](std::array::from_fn) in const.
 /// ```
 /// const OUT: [u8; 8] = car::from_fn!(|x| (x as u32 * 611170012 >> 24) as u8);
 /// assert_eq!(OUT, [0, 36, 72, 109, 145, 182, 218, 255]);
 /// ```
-
 #[proc_macro]
 pub fn from_fn(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let ExprClosure { inputs, body, .. } = parse_macro_input!(input as ExprClosure);
@@ -22,11 +31,9 @@ pub fn from_fn(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             .into();
     };
     let inputs = inputs.into_iter();
-    quote! { unsafe {
-        // dont worry about this whole area
-        const fn uninit_array<T, const N: usize>() -> [::core::mem::MaybeUninit<T>; N] { unsafe { ::core::mem::MaybeUninit::<[::core::mem::MaybeUninit<T>; N]>::uninit().assume_init() } }
-        const unsafe fn aai<T, const N: usize>(array: [::core::mem::MaybeUninit<T>; N]) -> [T; N] { transmute_unchecked(array) }
-        const unsafe fn transmute_unchecked<T, U>(value: T) -> U { unsafe { #[repr(C)] union Transmute<T, U> { t: ::core::mem::ManuallyDrop<T>, u: ::core::mem::ManuallyDrop<U> } ::core::mem::ManuallyDrop::into_inner(Transmute { t: ::core::mem::ManuallyDrop::new(value) }.u) } }
+    let lib = lib();
+    quote! { {
+        #lib
 
         let mut __out = uninit_array();
         let mut i = 0usize;
@@ -42,8 +49,9 @@ pub fn from_fn(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             });
             i += 1;
         }
-        aai(__out)
-    } }.into()
+        unsafe { aai(__out) }
+    } }
+    .into()
 }
 
 /// [Map](array::map) in const.
@@ -88,14 +96,12 @@ pub fn map(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             .into();
     };
     let index = inputs.next().into_iter();
-    quote! { unsafe {
-        // dont worry about this whole area
-        const fn uninit_array<T, U, const N: usize>(/* steal the length */ _len: &[U; N]) -> [::core::mem::MaybeUninit<T>; N] { unsafe { ::core::mem::MaybeUninit::<[::core::mem::MaybeUninit<T>; N]>::uninit().assume_init() } }
-        const unsafe fn aai<T, const N: usize>(array: [::core::mem::MaybeUninit<T>; N]) -> [T; N] { transmute_unchecked(array) }
-        const unsafe fn transmute_unchecked<T, U>(value: T) -> U { unsafe { #[repr(C)] union Transmute<T, U> { t: ::core::mem::ManuallyDrop<T>, u: ::core::mem::ManuallyDrop<U> } ::core::mem::ManuallyDrop::into_inner(Transmute { t: ::core::mem::ManuallyDrop::new(value) }.u) } }
+    let lib = lib();
+    quote! { {
+        #lib
 
         let __arr = #array;
-        let mut __out = uninit_array(&__arr);
+        let mut __out = uninit_array_copied(&__arr);
         let size = __arr.len();
         let __ap = __arr.as_ptr();
         let __arr = ::core::mem::ManuallyDrop::new(__arr);
@@ -103,7 +109,7 @@ pub fn map(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         while i < size {
             __out[i] = ::core::mem::MaybeUninit::new({
                 let i = i;
-                let #binding = __ap.add(i).read();
+                let #binding = unsafe { __ap.add(i).read() };
                 let __out = ();
                 let __arr = ();
                 #(let #index = i;)*
@@ -112,6 +118,76 @@ pub fn map(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             });
             i += 1;
         }
-        aai(__out)
-    }}.into()
+        unsafe { aai(__out) }
+    }}
+    .into()
+}
+
+fn try_from_fn(
+    input: proc_macro::TokenStream,
+    good: proc_macro2::TokenStream,
+    bad: proc_macro2::TokenStream,
+) -> proc_macro::TokenStream {
+    let ExprClosure { inputs, body, .. } = parse_macro_input!(input as ExprClosure);
+    if inputs.len() > 1 {
+        let n = inputs.len();
+        return Error::new_spanned(inputs, format!("expected one (or 0) inputs, found {n}"))
+            .into_compile_error()
+            .into();
+    };
+    let inputs = inputs.into_iter();
+    let lib = lib();
+    quote! { {
+        #lib
+        let mut __out = uninit_array();
+        let mut i = 0usize;
+        loop {
+            if i >= __out.len() {
+                break #good(unsafe { aai(__out) })
+            }
+            __out[i] = ::core::mem::MaybeUninit::new({
+                // disable mutation (cant shadow)
+                let i = i;
+                let __out = ();
+
+                #(let #inputs = i)*;
+
+                match #body {
+                    #good(x) => x,
+                    #bad,
+                }
+            });
+            i += 1;
+        }
+    } }
+    .into()
+}
+
+#[proc_macro]
+/// [Try from fn](std::array::try_from_fn) in const, for options.
+/// ```
+/// let array: Option<[_; 4]> = car::try_from_fn_option!(|i| i.checked_add(100));
+/// assert_eq!(array, Some([100, 101, 102, 103]));
+///
+/// let array: Option<[_; 4]> = car::try_from_fn_option!(|i| i.checked_sub(100));
+/// assert_eq!(array, None);
+/// ```
+pub fn try_from_fn_option(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    try_from_fn(input, quote!(Some), quote!(None => break None))
+}
+
+#[proc_macro]
+/// [Try from fn](std::array::try_from_fn) in const, for results.
+/// ```
+/// let array: Result<[u8; 5], _> = car::try_from_fn_result!(|i| i.try_into());
+/// assert_eq!(array, Ok([0, 1, 2, 3, 4]));
+/// let array: Result<[i8; 200], _> = car::try_from_fn_result!(|i| i.try_into());
+/// assert!(array.is_err());
+/// ```
+pub fn try_from_fn_result(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    try_from_fn(
+        input,
+        quote!(Ok),
+        quote!(Err(x) => break Err(x /* .into() */)),
+    )
 }
