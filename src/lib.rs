@@ -126,7 +126,8 @@ pub fn map(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 fn try_from_fn(
     input: proc_macro::TokenStream,
     good: proc_macro2::TokenStream,
-    bad: proc_macro2::TokenStream,
+    pat: proc_macro2::TokenStream,
+    then: proc_macro2::TokenStream,
 ) -> proc_macro::TokenStream {
     let ExprClosure { inputs, body, .. } = parse_macro_input!(input as ExprClosure);
     if inputs.len() > 1 {
@@ -148,13 +149,20 @@ fn try_from_fn(
             __out[i] = ::core::mem::MaybeUninit::new({
                 // disable mutation (cant shadow)
                 let i = i;
-                let __out = ();
+                let __out = __out;
 
                 #(let #inputs = i)*;
 
                 match #body {
                     #good(x) => x,
-                    #bad,
+                    #pat => {
+                        let mut j = 0;
+                        while j < i {
+                            unsafe { __out[j].assume_init() };
+                            j += 1;
+                        }
+                        #then
+                    }
                 }
             });
             i += 1;
@@ -173,7 +181,7 @@ fn try_from_fn(
 /// assert_eq!(array, None);
 /// ```
 pub fn try_from_fn_option(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    try_from_fn(input, quote!(Some), quote!(None => break None))
+    try_from_fn(input, quote!(Some), quote!(None), quote!(break None))
 }
 
 #[proc_macro]
@@ -188,6 +196,7 @@ pub fn try_from_fn_result(input: proc_macro::TokenStream) -> proc_macro::TokenSt
     try_from_fn(
         input,
         quote!(Ok),
-        quote!(Err(x) => break Err(x /* .into() */)),
+        quote!(Err(e)),
+        quote!(break Err(e /* .into() */)),
     )
 }
